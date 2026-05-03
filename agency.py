@@ -1,5 +1,4 @@
 import os
-import time
 from datetime import datetime
 
 import streamlit as st
@@ -8,44 +7,7 @@ from openai import OpenAI
 
 
 # =========================
-# Load Environment Variables
-# =========================
-
-load_dotenv()
-
-OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", os.getenv("OPENROUTER_API_KEY"))
-
-DEFAULT_MODEL = st.secrets.get(
-    "OPENROUTER_MODEL",
-    os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
-)
-
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-
-
-# =========================
-# Available OpenRouter Models
-# =========================
-
-AVAILABLE_MODELS = [
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "google/gemma-3-27b-it:free",
-    "google/gemma-3-4b-it:free",
-    "openrouter/free",
-    "minimax/minimax-m2.5:free",
-]
-
-RECOMMENDED_SAFE_DEFAULTS = [
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "google/gemma-3-27b-it:free",
-    "google/gemma-3-4b-it:free",
-    "openrouter/free",
-    "minimax/minimax-m2.5:free",
-]
-
-
-# =========================
-# Streamlit Page Config
+# Page Config
 # =========================
 
 st.set_page_config(
@@ -56,16 +18,50 @@ st.set_page_config(
 
 
 # =========================
+# Load Environment Variables
+# =========================
+
+load_dotenv()
+
+
+def get_config_value(key: str, default: str | None = None) -> str | None:
+    """
+    Reads config from Streamlit secrets first, then local .env.
+
+    Streamlit Cloud: use app secrets.
+    Local development: use .env.
+    """
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+
+    return os.getenv(key, default)
+
+
+OPENROUTER_API_KEY = get_config_value("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = get_config_value(
+    "OPENROUTER_MODEL",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+)
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+# =========================
 # OpenRouter Client
 # =========================
 
-def get_openrouter_client():
+def get_openrouter_client() -> OpenAI | None:
     if not OPENROUTER_API_KEY:
         return None
 
     return OpenAI(
         base_url=OPENROUTER_BASE_URL,
         api_key=OPENROUTER_API_KEY,
+        timeout=60.0,
+        max_retries=1,
     )
 
 
@@ -82,10 +78,8 @@ def build_messages_for_model(
     user_prompt: str,
 ) -> list[dict]:
     """
-    Some OpenRouter models, especially Google Gemma through Google AI Studio,
-    may reject system/developer instructions.
-
-    For those models, combine system instructions and user prompt into one user message.
+    Some models, especially Gemma-style models, may reject system/developer messages.
+    This helper keeps the app compatible if you change models later.
     """
 
     model_lower = model_id.lower()
@@ -130,10 +124,17 @@ def make_project_prompt(
     return f"""
 Analyze this client project.
 
-Project Name: {project_name}
-Project Type: {project_type}
-Budget Range: {budget_range}
-Timeline: {timeline}
+Project Name:
+{project_name}
+
+Project Type:
+{project_type}
+
+Budget Range:
+{budget_range}
+
+Timeline:
+{timeline}
 
 Target Users:
 {target_users}
@@ -156,254 +157,67 @@ Instructions:
 - Be honest about risks and tradeoffs.
 - Recommend an MVP-first approach.
 - Format the answer clearly with headings and bullet points.
+- Keep recommendations specific to this project.
 """
 
 
 # =========================
-# Error + Scoring Helpers
+# Error Handling
 # =========================
 
-def classify_openrouter_error(error_text: str) -> str:
-    error_text_lower = error_text.lower()
+def user_friendly_error(error_text: str) -> str:
+    lower = error_text.lower()
 
-    if (
-        "429" in error_text
-        or "rate limit" in error_text_lower
-        or "temporarily rate-limited" in error_text_lower
-    ):
-        return "Rate limited"
-
-    if "developer instruction is not enabled" in error_text_lower:
-        return "No system prompt support"
-
-    if "404" in error_text or "no endpoints found" in error_text_lower:
-        return "No endpoint"
-
-    if "400" in error_text or "not a valid model id" in error_text_lower:
-        return "Invalid model"
-
-    if "402" in error_text or "spend limit" in error_text_lower:
-        return "Spend limit"
-
-    if "api key" in error_text_lower:
-        return "API key issue"
-
-    return "Failed"
-
-
-def score_model_response(text: str, elapsed_seconds: float) -> tuple[int, list[str]]:
-    """
-    Simple local scoring. No extra AI call is used.
-
-    Score rewards:
-    - Useful detail
-    - Required business/technical sections
-    - Concrete MVP advice
-    - Risks/tradeoffs
-    - Budget/timeline awareness
-    - Project-specific reasoning
-    """
-
-    score = 0
-    reasons = []
-
-    cleaned = text.strip()
-    lower = cleaned.lower()
-    word_count = len(cleaned.split())
-
-    if word_count >= 250:
-        score += 25
-        reasons.append("Strong detail")
-    elif word_count >= 180:
-        score += 20
-        reasons.append("Good detail")
-    elif word_count >= 100:
-        score += 12
-        reasons.append("Acceptable detail")
-    elif word_count >= 50:
-        score += 6
-        reasons.append("Short but usable")
-    else:
-        score -= 15
-        reasons.append("Too short")
-
-    section_keywords = [
-        "business",
-        "technical",
-        "mvp",
-        "risk",
-        "roadmap",
-        "budget",
-        "timeline",
-        "users",
-        "revenue",
-        "launch",
-    ]
-
-    matched_keywords = [keyword for keyword in section_keywords if keyword in lower]
-    score += len(matched_keywords) * 5
-
-    if matched_keywords:
-        reasons.append(f"Covers {len(matched_keywords)} key areas")
-
-    practical_terms = [
-        "first",
-        "build",
-        "start",
-        "validate",
-        "pilot",
-        "vendor",
-        "payment",
-        "dashboard",
-        "tracking",
-        "support",
-    ]
-
-    practical_matches = [term for term in practical_terms if term in lower]
-    score += min(len(practical_matches) * 3, 24)
-
-    if practical_matches:
-        reasons.append("Practical implementation advice")
-
-    if "$10k" in cleaned or "$25k" in cleaned or "3-4" in cleaned or "3–4" in cleaned:
-        score += 10
-        reasons.append("Uses budget/timeline context")
-
-    if "campus" in lower and "food" in lower:
-        score += 8
-        reasons.append("Understands project context")
-
-    weak_terms = [
-        "i cannot",
-        "i can't",
-        "unable to",
-        "as an ai",
-        "error",
-    ]
-
-    if any(term in lower for term in weak_terms):
-        score -= 10
-        reasons.append("Contains weak/error-like wording")
-
-    if elapsed_seconds <= 10:
-        score += 8
-        reasons.append("Fast response")
-    elif elapsed_seconds <= 25:
-        score += 4
-        reasons.append("Reasonable speed")
-    else:
-        score -= 5
-        reasons.append("Slow response")
-
-    score = max(0, min(100, score))
-
-    if not reasons:
-        reasons.append("No strong quality signals")
-
-    return score, reasons
-
-
-# =========================
-# Model Test + Ranking
-# =========================
-
-def test_model_with_sample(
-    model_id: str,
-    project_prompt: str,
-    temperature: float = 0.3,
-) -> dict:
-    """
-    Tests one model using a short agency-style prompt.
-    Returns status, sample output, score, and timing.
-    """
-
-    if client is None:
-        raise ValueError("OPENROUTER_API_KEY is missing. Please add it to your .env file.")
-
-    test_system_prompt = """
-You are testing whether this model is good for an Nord AI Agency app.
-
-Return a concise but useful mini-report with exactly these headings:
-
-# Business
-# Technical
-# MVP
-# Risks
-# Recommendation
-
-Keep it practical and specific to the user's project.
-"""
-
-    mini_prompt = f"""
-Create a short test analysis for this project.
-
-{project_prompt}
-
-Limit the response to 250-400 words.
-"""
-
-    started_at = time.time()
-
-    try:
-        response = client.chat.completions.create(
-            model=model_id,
-            messages=build_messages_for_model(
-                model_id=model_id,
-                system_prompt=test_system_prompt,
-                user_prompt=mini_prompt,
-            ),
-            temperature=temperature,
-            max_tokens=700,
+    if "429" in error_text or "rate limit" in lower or "temporarily rate-limited" in lower:
+        return (
+            "The AI provider is temporarily rate-limited. "
+            "Please try again in a few minutes."
         )
 
-        elapsed = time.time() - started_at
-        output = response.choices[0].message.content or ""
-        score, reasons = score_model_response(output, elapsed)
+    if "402" in error_text or "spend limit" in lower:
+        return (
+            "The OpenRouter API key has reached its spending limit. "
+            "Please check your OpenRouter account settings."
+        )
 
-        return {
-            "model": model_id,
-            "status": "Working",
-            "score": score,
-            "seconds": round(elapsed, 2),
-            "reason": ", ".join(reasons),
-            "sample": output,
-            "error": "",
-        }
+    if "401" in error_text or "api key" in lower or "unauthorized" in lower:
+        return (
+            "The OpenRouter API key is missing or invalid. "
+            "Please check the app secrets."
+        )
 
-    except Exception as e:
-        elapsed = time.time() - started_at
-        error_text = str(e)
-        error_type = classify_openrouter_error(error_text)
+    if "404" in error_text or "no endpoints found" in lower:
+        return (
+            "The selected model currently has no available endpoint. "
+            "Please update OPENROUTER_MODEL in app secrets."
+        )
 
-        return {
-            "model": model_id,
-            "status": error_type,
-            "score": 0,
-            "seconds": round(elapsed, 2),
-            "reason": error_type,
-            "sample": "",
-            "error": error_text,
-        }
+    if "timeout" in lower:
+        return (
+            "The request took too long. "
+            "Please try again with a shorter project description."
+        )
+
+    return "Something went wrong while generating the report."
 
 
 # =========================
-# Full Report Generator
+# Report Generator
 # =========================
 
 def generate_full_report(
-    selected_model: str,
     project_prompt: str,
     temperature: float = 0.5,
 ) -> str:
     """
-    Generates the full agency report in ONE OpenRouter request.
+    Generates one complete agency report with a single OpenRouter request.
     """
 
     if client is None:
-        raise ValueError("OPENROUTER_API_KEY is missing. Please add it to your .env file.")
+        raise ValueError("OPENROUTER_API_KEY is missing.")
 
     system_prompt = """
-You are an Nord AI Agency made of five expert roles:
+You are Nord AI Agency, a practical AI services agency made of five expert roles:
 
 1. CEO
 2. CTO
@@ -461,86 +275,27 @@ Include:
 
 Important rules:
 - Be practical and beginner-friendly.
-- Focus on realistic delivery within the budget and timeline.
+- Focus on realistic delivery within the stated budget and timeline.
 - Be honest about tradeoffs.
 - Recommend an MVP-first approach.
-- Use headings, bullet points, and tables where useful.
-- Do not include generic hype.
+- Use headings, bullet points, and simple tables where useful.
+- Avoid generic hype.
 - Do not mention that you are an AI model.
+- Keep the report detailed but not excessively long.
 """
 
     response = client.chat.completions.create(
-        model=selected_model,
+        model=OPENROUTER_MODEL,
         messages=build_messages_for_model(
-            model_id=selected_model,
+            model_id=OPENROUTER_MODEL,
             system_prompt=system_prompt,
             user_prompt=project_prompt,
         ),
         temperature=temperature,
+        max_tokens=2200,
     )
 
     return response.choices[0].message.content
-
-
-# =========================
-# Session State
-# =========================
-
-if "benchmark_results" not in st.session_state:
-    st.session_state.benchmark_results = []
-
-if "best_model" not in st.session_state:
-    st.session_state.best_model = DEFAULT_MODEL
-
-if "latest_report" not in st.session_state:
-    st.session_state.latest_report = ""
-
-
-# =========================
-# Sidebar
-# =========================
-
-st.sidebar.title("⚙️ Settings")
-
-default_index = 0
-if st.session_state.best_model in AVAILABLE_MODELS:
-    default_index = AVAILABLE_MODELS.index(st.session_state.best_model)
-elif DEFAULT_MODEL in AVAILABLE_MODELS:
-    default_index = AVAILABLE_MODELS.index(DEFAULT_MODEL)
-
-selected_model = st.sidebar.selectbox(
-    "Choose OpenRouter Model",
-    AVAILABLE_MODELS,
-    index=default_index,
-)
-
-temperature_mode = st.sidebar.selectbox(
-    "Creativity Level",
-    ["Balanced", "More Precise", "More Creative"],
-    index=0,
-)
-
-if temperature_mode == "More Precise":
-    selected_temperature = 0.3
-elif temperature_mode == "More Creative":
-    selected_temperature = 0.7
-else:
-    selected_temperature = 0.5
-
-st.sidebar.markdown("---")
-st.sidebar.write("Current model:")
-st.sidebar.code(selected_model)
-
-st.sidebar.write("Best ranked model:")
-st.sidebar.code(st.session_state.best_model)
-
-st.sidebar.write("Temperature:")
-st.sidebar.code(str(selected_temperature))
-
-st.sidebar.markdown("---")
-st.sidebar.info(
-    "Use benchmark mode to test models with a short prompt before generating the full report."
-)
 
 
 # =========================
@@ -550,27 +305,45 @@ st.sidebar.info(
 st.title("🤖 Nord AI Agency")
 
 st.write(
-    "Enter a project idea, benchmark free OpenRouter models, rank their outputs, then generate a full agency-style report with the best model."
+    "Generate a practical business, product, technical, and launch report for your project idea."
 )
 
 if not OPENROUTER_API_KEY:
-    st.error(
-        "OPENROUTER_API_KEY is missing. Please add it to your `.env` file before running the app."
+    st.error("OpenRouter API key is missing.")
+    st.info(
+        "If running locally, add `OPENROUTER_API_KEY` to your `.env` file. "
+        "If deployed on Streamlit Cloud, add it in app secrets."
     )
-
-    st.code(
-        """
-OPENROUTER_API_KEY=your_openrouter_key_here
-OPENROUTER_MODEL=nvidia/nemotron-3-super-120b-a12b:free
-""",
-        language="env",
-    )
-
     st.stop()
 
 
+with st.sidebar:
+    st.title("Settings")
+    st.write("Model")
+    st.code(OPENROUTER_MODEL)
+
+    selected_temperature_label = st.selectbox(
+        "Report Style",
+        ["Balanced", "More Precise", "More Creative"],
+        index=0,
+    )
+
+    if selected_temperature_label == "More Precise":
+        selected_temperature = 0.3
+    elif selected_temperature_label == "More Creative":
+        selected_temperature = 0.7
+    else:
+        selected_temperature = 0.5
+
+    st.write("Temperature")
+    st.code(str(selected_temperature))
+
+    st.markdown("---")
+    st.info("Production mode: one model, one report generation request.")
+
+
 # =========================
-# Project Input Form
+# Form
 # =========================
 
 with st.form("project_form"):
@@ -648,213 +421,70 @@ with st.form("project_form"):
 
     must_have_features = st.text_area(
         "Must-Have Features",
-        placeholder="Example: Restaurant listing, menu browsing, ordering, mobile money payment, delivery tracking, vendor dashboard",
+        placeholder=(
+            "Example: Restaurant listing, menu browsing, ordering, "
+            "mobile money payment, delivery tracking, vendor dashboard"
+        ),
         height=100,
     )
 
-    col_a, col_b, col_c = st.columns(3)
-
-    with col_a:
-        benchmark_submitted = st.form_submit_button("Test and Rank Models")
-
-    with col_b:
-        report_submitted = st.form_submit_button("Generate Full Report")
-
-    with col_c:
-        best_report_submitted = st.form_submit_button("Use Best Model for Report")
+    submitted = st.form_submit_button("Generate Agency Report")
 
 
 # =========================
-# Validation
+# Generate Report
 # =========================
 
-def validate_project_inputs() -> bool:
+if submitted:
     if not project_name.strip():
         st.error("Please enter the project name.")
-        return False
+        st.stop()
 
     if not project_description.strip():
         st.error("Please enter the project description.")
-        return False
+        st.stop()
 
     if not main_problem.strip():
         st.error("Please enter the problem this project solves.")
-        return False
+        st.stop()
 
     if not must_have_features.strip():
         st.error("Please enter the must-have features.")
-        return False
-
-    return True
-
-
-# =========================
-# Build Prompt
-# =========================
-
-project_prompt = make_project_prompt(
-    project_name=project_name,
-    project_type=project_type,
-    budget_range=budget_range,
-    timeline=timeline,
-    target_users=target_users,
-    business_goal=business_goal,
-    project_description=project_description,
-    main_problem=main_problem,
-    must_have_features=must_have_features,
-)
-
-
-# =========================
-# Benchmark Models
-# =========================
-
-if benchmark_submitted:
-    if not validate_project_inputs():
         st.stop()
 
-    st.markdown("---")
-    st.subheader("Model Benchmark Results")
-
-    st.warning(
-        "This will call each selected model once. Free models may still return 429 rate-limit errors."
+    project_prompt = make_project_prompt(
+        project_name=project_name,
+        project_type=project_type,
+        budget_range=budget_range,
+        timeline=timeline,
+        target_users=target_users,
+        business_goal=business_goal,
+        project_description=project_description,
+        main_problem=main_problem,
+        must_have_features=must_have_features,
     )
 
-    selected_models_to_test = st.multiselect(
-        "Models to test",
-        AVAILABLE_MODELS,
-        default=RECOMMENDED_SAFE_DEFAULTS,
-    )
-
-    if not selected_models_to_test:
-        st.error("Please select at least one model to test.")
-        st.stop()
-
-    results = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    for index, model_id in enumerate(selected_models_to_test, start=1):
-        status_text.write(f"Testing {model_id}...")
-
-        result = test_model_with_sample(
-            model_id=model_id,
-            project_prompt=project_prompt,
-            temperature=0.3,
-        )
-
-        results.append(result)
-        progress_bar.progress(index / len(selected_models_to_test))
-
-        # Small delay helps avoid burst rate limits.
-        time.sleep(1)
-
-    ranked_results = sorted(
-        results,
-        key=lambda item: (item["score"], -item["seconds"]),
-        reverse=True,
-    )
-
-    st.session_state.benchmark_results = ranked_results
-
-    working_results = [
-        item for item in ranked_results
-        if item["status"] == "Working" and item["score"] > 0
-    ]
-
-    if working_results:
-        st.session_state.best_model = working_results[0]["model"]
-        st.success(f"Best working model: {st.session_state.best_model}")
-    else:
-        st.error("No working model found in this benchmark run.")
-
-    status_text.success("Benchmark complete.")
-
-
-# =========================
-# Display Benchmark Results
-# =========================
-
-if st.session_state.benchmark_results:
     st.markdown("---")
-    st.subheader("Ranked Models")
+    st.subheader("Agency Report")
 
-    table_rows = []
-
-    for rank, item in enumerate(st.session_state.benchmark_results, start=1):
-        table_rows.append(
-            {
-                "Rank": rank,
-                "Model": item["model"],
-                "Status": item["status"],
-                "Score": item["score"],
-                "Seconds": item["seconds"],
-                "Reason": item["reason"],
-            }
-        )
-
-    st.dataframe(table_rows, use_container_width=True)
-
-    st.subheader("Model Samples")
-
-    for rank, item in enumerate(st.session_state.benchmark_results, start=1):
-        with st.expander(
-            f"#{rank} — {item['model']} — {item['status']} — Score {item['score']}"
-        ):
-            if item["sample"]:
-                st.markdown(item["sample"])
-
-            if item["error"]:
-                st.code(item["error"])
-
-
-# =========================
-# Generate Full Report
-# =========================
-
-should_generate_report = report_submitted or best_report_submitted
-
-if should_generate_report:
-    if not validate_project_inputs():
-        st.stop()
-
-    model_for_report = selected_model
-
-    if best_report_submitted:
-        model_for_report = st.session_state.best_model
-
-    st.markdown("---")
-    st.subheader("Analysis Results")
-
-    st.write("Using model:")
-    st.code(model_for_report)
-
-    with st.spinner("Generating full agency report..."):
+    with st.spinner("Generating your agency report..."):
         try:
             ai_report = generate_full_report(
-                selected_model=model_for_report,
                 project_prompt=project_prompt,
                 temperature=selected_temperature,
             )
 
         except Exception as e:
-            st.error("Something went wrong while generating the report.")
-            st.code(str(e))
+            error_text = str(e)
+            st.error(user_friendly_error(error_text))
 
-            st.warning(
-                "Run `Test and Rank Models` first, then use the best working model for the full report."
-            )
+            with st.expander("Technical error details"):
+                st.code(error_text)
 
             st.stop()
 
-    st.session_state.latest_report = ai_report
-
-    st.success("Analysis complete.")
+    st.success("Report generated successfully.")
     st.markdown(ai_report)
-
-    # =========================
-    # Build Downloadable Report
-    # =========================
 
     report_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -862,7 +492,7 @@ if should_generate_report:
 
 Generated: {report_date}
 
-Model Used: {model_for_report}
+Model Used: {OPENROUTER_MODEL}
 
 ---
 
@@ -906,10 +536,8 @@ Model Used: {model_for_report}
     st.markdown("---")
 
     st.download_button(
-        label="Download Full Report",
+        label="Download Report",
         data=full_report,
-        file_name="agency_report.md",
+        file_name="nord_ai_agency_report.md",
         mime="text/markdown",
     )
-
-    st.success("Your AI agency report is ready.")
