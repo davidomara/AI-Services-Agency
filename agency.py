@@ -1,5 +1,4 @@
 import os
-import re
 import time
 from datetime import datetime
 
@@ -27,28 +26,21 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # =========================
 # Available OpenRouter Models
 # =========================
-# These are models you want to test/rank.
-# Free models can still be rate-limited depending on provider load.
 
 AVAILABLE_MODELS = [
     "nvidia/nemotron-3-super-120b-a12b:free",
-    "minimax/minimax-m2.5:free",
-    "qwen/qwen3-coder:free",
-    "openrouter/free",
-    "qwen/qwen3-30b-a3b:free",
-    "qwen/qwen3-235b-a22b:free",
     "google/gemma-3-27b-it:free",
     "google/gemma-3-4b-it:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    
+    "openrouter/free",
+    "minimax/minimax-m2.5:free",
 ]
 
 RECOMMENDED_SAFE_DEFAULTS = [
     "nvidia/nemotron-3-super-120b-a12b:free",
-    "qwen/qwen3-coder:free",
-    "openrouter/free",
     "google/gemma-3-27b-it:free",
     "google/gemma-3-4b-it:free",
+    "openrouter/free",
+    "minimax/minimax-m2.5:free",
 ]
 
 
@@ -81,14 +73,108 @@ client = get_openrouter_client()
 
 
 # =========================
-# Helper Functions
+# Prompt Helpers
+# =========================
+
+def build_messages_for_model(
+    model_id: str,
+    system_prompt: str,
+    user_prompt: str,
+) -> list[dict]:
+    """
+    Some OpenRouter models, especially Google Gemma through Google AI Studio,
+    may reject system/developer instructions.
+
+    For those models, combine system instructions and user prompt into one user message.
+    """
+
+    model_lower = model_id.lower()
+
+    if "gemma" in model_lower or model_lower.startswith("google/"):
+        return [
+            {
+                "role": "user",
+                "content": f"""
+Instructions:
+{system_prompt}
+
+User request:
+{user_prompt}
+""",
+            }
+        ]
+
+    return [
+        {
+            "role": "system",
+            "content": system_prompt,
+        },
+        {
+            "role": "user",
+            "content": user_prompt,
+        },
+    ]
+
+
+def make_project_prompt(
+    project_name: str,
+    project_type: str,
+    budget_range: str,
+    timeline: str,
+    target_users: str,
+    business_goal: str,
+    project_description: str,
+    main_problem: str,
+    must_have_features: str,
+) -> str:
+    return f"""
+Analyze this client project.
+
+Project Name: {project_name}
+Project Type: {project_type}
+Budget Range: {budget_range}
+Timeline: {timeline}
+
+Target Users:
+{target_users}
+
+Main Business Goal:
+{business_goal}
+
+Project Description:
+{project_description}
+
+Problem Solved:
+{main_problem}
+
+Must-Have Features:
+{must_have_features}
+
+Instructions:
+- Give practical, beginner-friendly advice.
+- Focus on realistic delivery within the budget and timeline.
+- Be honest about risks and tradeoffs.
+- Recommend an MVP-first approach.
+- Format the answer clearly with headings and bullet points.
+"""
+
+
+# =========================
+# Error + Scoring Helpers
 # =========================
 
 def classify_openrouter_error(error_text: str) -> str:
     error_text_lower = error_text.lower()
 
-    if "429" in error_text or "rate limit" in error_text_lower or "temporarily rate-limited" in error_text_lower:
+    if (
+        "429" in error_text
+        or "rate limit" in error_text_lower
+        or "temporarily rate-limited" in error_text_lower
+    ):
         return "Rate limited"
+
+    if "developer instruction is not enabled" in error_text_lower:
+        return "No system prompt support"
 
     if "404" in error_text or "no endpoints found" in error_text_lower:
         return "No endpoint"
@@ -110,16 +196,12 @@ def score_model_response(text: str, elapsed_seconds: float) -> tuple[int, list[s
     Simple local scoring. No extra AI call is used.
 
     Score rewards:
-    - Useful length
+    - Useful detail
     - Required business/technical sections
     - Concrete MVP advice
     - Risks/tradeoffs
     - Budget/timeline awareness
-
-    Score penalizes:
-    - Too short
-    - Refusal/error-like output
-    - Generic answer
+    - Project-specific reasoning
     """
 
     score = 0
@@ -129,7 +211,10 @@ def score_model_response(text: str, elapsed_seconds: float) -> tuple[int, list[s
     lower = cleaned.lower()
     word_count = len(cleaned.split())
 
-    if word_count >= 180:
+    if word_count >= 250:
+        score += 25
+        reasons.append("Strong detail")
+    elif word_count >= 180:
         score += 20
         reasons.append("Good detail")
     elif word_count >= 100:
@@ -188,13 +273,17 @@ def score_model_response(text: str, elapsed_seconds: float) -> tuple[int, list[s
         score += 8
         reasons.append("Understands project context")
 
-    if "error" in lower or "cannot" in lower or "unable" in lower:
+    weak_terms = [
+        "i cannot",
+        "i can't",
+        "unable to",
+        "as an ai",
+        "error",
+    ]
+
+    if any(term in lower for term in weak_terms):
         score -= 10
         reasons.append("Contains weak/error-like wording")
-
-    if word_count < 80 and "generic" in lower:
-        score -= 10
-        reasons.append("Generic output")
 
     if elapsed_seconds <= 10:
         score += 8
@@ -212,49 +301,6 @@ def score_model_response(text: str, elapsed_seconds: float) -> tuple[int, list[s
         reasons.append("No strong quality signals")
 
     return score, reasons
-
-
-def make_project_prompt(
-    project_name: str,
-    project_type: str,
-    budget_range: str,
-    timeline: str,
-    target_users: str,
-    business_goal: str,
-    project_description: str,
-    main_problem: str,
-    must_have_features: str,
-) -> str:
-    return f"""
-Analyze this client project.
-
-Project Name: {project_name}
-Project Type: {project_type}
-Budget Range: {budget_range}
-Timeline: {timeline}
-
-Target Users:
-{target_users}
-
-Main Business Goal:
-{business_goal}
-
-Project Description:
-{project_description}
-
-Problem Solved:
-{main_problem}
-
-Must-Have Features:
-{must_have_features}
-
-Instructions:
-- Give practical, beginner-friendly advice.
-- Focus on realistic delivery within the budget and timeline.
-- Be honest about risks and tradeoffs.
-- Recommend an MVP-first approach.
-- Format the answer clearly with headings and bullet points.
-"""
 
 
 # =========================
@@ -301,10 +347,11 @@ Limit the response to 250-400 words.
     try:
         response = client.chat.completions.create(
             model=model_id,
-            messages=[
-                {"role": "system", "content": test_system_prompt},
-                {"role": "user", "content": mini_prompt},
-            ],
+            messages=build_messages_for_model(
+                model_id=model_id,
+                system_prompt=test_system_prompt,
+                user_prompt=mini_prompt,
+            ),
             temperature=temperature,
             max_tokens=700,
         )
@@ -424,10 +471,11 @@ Important rules:
 
     response = client.chat.completions.create(
         model=selected_model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": project_prompt},
-        ],
+        messages=build_messages_for_model(
+            model_id=selected_model,
+            system_prompt=system_prompt,
+            user_prompt=project_prompt,
+        ),
         temperature=temperature,
     )
 
@@ -617,7 +665,7 @@ with st.form("project_form"):
 
 
 # =========================
-# Validate Inputs
+# Validation
 # =========================
 
 def validate_project_inputs() -> bool:
@@ -698,7 +746,7 @@ if benchmark_submitted:
         results.append(result)
         progress_bar.progress(index / len(selected_models_to_test))
 
-        # Small delay helps avoid immediate burst rate limits.
+        # Small delay helps avoid burst rate limits.
         time.sleep(1)
 
     ranked_results = sorted(
@@ -709,7 +757,10 @@ if benchmark_submitted:
 
     st.session_state.benchmark_results = ranked_results
 
-    working_results = [item for item in ranked_results if item["status"] == "Working"]
+    working_results = [
+        item for item in ranked_results
+        if item["status"] == "Working" and item["score"] > 0
+    ]
 
     if working_results:
         st.session_state.best_model = working_results[0]["model"]
@@ -747,7 +798,9 @@ if st.session_state.benchmark_results:
     st.subheader("Model Samples")
 
     for rank, item in enumerate(st.session_state.benchmark_results, start=1):
-        with st.expander(f"#{rank} — {item['model']} — {item['status']} — Score {item['score']}"):
+        with st.expander(
+            f"#{rank} — {item['model']} — {item['status']} — Score {item['score']}"
+        ):
             if item["sample"]:
                 st.markdown(item["sample"])
 
@@ -772,6 +825,7 @@ if should_generate_report:
 
     st.markdown("---")
     st.subheader("Analysis Results")
+
     st.write("Using model:")
     st.code(model_for_report)
 
