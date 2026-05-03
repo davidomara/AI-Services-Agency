@@ -1,9 +1,16 @@
 import os
 from datetime import datetime
+from io import BytesIO
 
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
+
+from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 
 # =========================
@@ -88,7 +95,7 @@ client = get_openrouter_client()
 
 
 # =========================
-# Helpers
+# Prompt Helpers
 # =========================
 
 def build_messages_for_model(
@@ -280,6 +287,10 @@ Focus on delivery, launch, and client satisfaction.
 ]
 
 
+# =========================
+# OpenRouter Generation
+# =========================
+
 def generate_section_with_fallback(
     section_title: str,
     section_prompt: str,
@@ -361,6 +372,7 @@ Task:
 
         except Exception as e:
             error_text = str(e)
+
             attempt_logs.append(
                 {
                     "section": section_title,
@@ -369,6 +381,7 @@ Task:
                     "error": error_text,
                 }
             )
+
             continue
 
     raise RuntimeError(f"All fallback models failed for section: {section_title}")
@@ -421,13 +434,166 @@ def generate_report_with_fallbacks(
 
 
 # =========================
+# PDF Export
+# =========================
+
+def escape_pdf_text(text: str) -> str:
+    """
+    Escapes characters that ReportLab Paragraph treats as XML/HTML.
+    """
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def clean_markdown_for_pdf(text: str) -> str:
+    """
+    Small Markdown cleanup for PDF text.
+    """
+    return (
+        text.replace("**", "")
+        .replace("__", "")
+        .replace("`", "")
+    )
+
+
+def markdown_to_pdf_bytes(
+    markdown_text: str,
+    title: str = "Nord AI Agency Report",
+) -> bytes:
+    """
+    Converts simple Markdown into a PDF file.
+
+    Supports:
+    - # headings
+    - ## headings
+    - ### headings
+    - bullet lines
+    - normal paragraphs
+    """
+
+    buffer = BytesIO()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=0.7 * inch,
+        leftMargin=0.7 * inch,
+        topMargin=0.7 * inch,
+        bottomMargin=0.7 * inch,
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "CustomTitle",
+        parent=styles["Title"],
+        fontSize=20,
+        leading=24,
+        spaceAfter=16,
+        alignment=TA_LEFT,
+    )
+
+    heading1_style = ParagraphStyle(
+        "CustomHeading1",
+        parent=styles["Heading1"],
+        fontSize=16,
+        leading=20,
+        spaceBefore=14,
+        spaceAfter=8,
+    )
+
+    heading2_style = ParagraphStyle(
+        "CustomHeading2",
+        parent=styles["Heading2"],
+        fontSize=13,
+        leading=16,
+        spaceBefore=10,
+        spaceAfter=6,
+    )
+
+    body_style = ParagraphStyle(
+        "CustomBody",
+        parent=styles["BodyText"],
+        fontSize=10,
+        leading=14,
+        spaceAfter=6,
+    )
+
+    bullet_style = ParagraphStyle(
+        "CustomBullet",
+        parent=styles["BodyText"],
+        fontSize=10,
+        leading=14,
+        leftIndent=14,
+        firstLineIndent=-8,
+        spaceAfter=4,
+    )
+
+    story = []
+    story.append(Paragraph(escape_pdf_text(title), title_style))
+    story.append(Spacer(1, 0.15 * inch))
+
+    lines = markdown_text.splitlines()
+
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        if not line:
+            story.append(Spacer(1, 0.08 * inch))
+            continue
+
+        if line == "---":
+            story.append(Spacer(1, 0.18 * inch))
+            continue
+
+        line = clean_markdown_for_pdf(line)
+
+        if line.startswith("# "):
+            story.append(Paragraph(escape_pdf_text(line[2:].strip()), heading1_style))
+            continue
+
+        if line.startswith("## "):
+            story.append(Paragraph(escape_pdf_text(line[3:].strip()), heading2_style))
+            continue
+
+        if line.startswith("### "):
+            story.append(Paragraph(escape_pdf_text(line[4:].strip()), heading2_style))
+            continue
+
+        if line.startswith("- "):
+            story.append(
+                Paragraph("• " + escape_pdf_text(line[2:].strip()), bullet_style)
+            )
+            continue
+
+        if line.startswith("* "):
+            story.append(
+                Paragraph("• " + escape_pdf_text(line[2:].strip()), bullet_style)
+            )
+            continue
+
+        story.append(Paragraph(escape_pdf_text(line), body_style))
+
+    doc.build(story)
+
+    pdf_value = buffer.getvalue()
+    buffer.close()
+
+    return pdf_value
+
+
+# =========================
 # UI
 # =========================
 
 st.title("🤖 Nord AI Agency")
 
 st.write(
-    "Generate a practical agency-style project report. If one model fails or times out, the app automatically tries the next selected model."
+    "Generate a practical agency-style project report. "
+    "If one model fails or times out, the app automatically tries the next selected model."
 )
 
 if not OPENROUTER_API_KEY:
@@ -623,7 +789,9 @@ if submitted:
                 temperature=selected_temperature,
             )
         except Exception as e:
-            st.error("All selected models failed. Please try again later or choose different models.")
+            st.error(
+                "All selected models failed. Please try again later or choose different models."
+            )
             with st.expander("Technical error details"):
                 st.code(str(e))
             st.stop()
@@ -698,11 +866,27 @@ Generated: {report_date}
 {ai_report}
 """
 
+    pdf_report = markdown_to_pdf_bytes(
+        markdown_text=full_report,
+        title=f"Nord AI Agency Report - {project_name}",
+    )
+
     st.markdown("---")
 
-    st.download_button(
-        label="Download Report",
-        data=full_report,
-        file_name="nord_ai_agency_report.md",
-        mime="text/markdown",
-    )
+    col_download_1, col_download_2 = st.columns(2)
+
+    with col_download_1:
+        st.download_button(
+            label="Download Markdown Report",
+            data=full_report,
+            file_name="nord_ai_agency_report.md",
+            mime="text/markdown",
+        )
+
+    with col_download_2:
+        st.download_button(
+            label="Download PDF Report",
+            data=pdf_report,
+            file_name="nord_ai_agency_report.pdf",
+            mime="application/pdf",
+        )
