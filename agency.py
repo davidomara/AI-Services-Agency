@@ -1,4 +1,6 @@
 import os
+import re
+import time
 from datetime import datetime
 
 import streamlit as st
@@ -25,14 +27,27 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # =========================
 # Available OpenRouter Models
 # =========================
-# Keep Nemotron first because it already worked for you.
-# Free models can still be rate-limited depending on OpenRouter/provider load.
+# These are models you want to test/rank.
+# Free models can still be rate-limited depending on provider load.
 
 AVAILABLE_MODELS = [
     "nvidia/nemotron-3-super-120b-a12b:free",
-    "qwen/qwen3-coder:free",
     "minimax/minimax-m2.5:free",
+    "qwen/qwen3-coder:free",
+    "openrouter/free",
+    "qwen/qwen3-30b-a3b:free",
+    "qwen/qwen3-235b-a22b:free",
+    "google/gemma-3-27b-it:free",
+    "google/gemma-3-4b-it:free",
     "meta-llama/llama-3.3-70b-instruct:free",
+    
+]
+
+RECOMMENDED_SAFE_DEFAULTS = [
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "qwen/qwen3-coder:free",
+    "openrouter/free",
+    "google/gemma-3-27b-it:free",
     "google/gemma-3-4b-it:free",
 ]
 
@@ -66,7 +81,266 @@ client = get_openrouter_client()
 
 
 # =========================
-# Report Generator
+# Helper Functions
+# =========================
+
+def classify_openrouter_error(error_text: str) -> str:
+    error_text_lower = error_text.lower()
+
+    if "429" in error_text or "rate limit" in error_text_lower or "temporarily rate-limited" in error_text_lower:
+        return "Rate limited"
+
+    if "404" in error_text or "no endpoints found" in error_text_lower:
+        return "No endpoint"
+
+    if "400" in error_text or "not a valid model id" in error_text_lower:
+        return "Invalid model"
+
+    if "402" in error_text or "spend limit" in error_text_lower:
+        return "Spend limit"
+
+    if "api key" in error_text_lower:
+        return "API key issue"
+
+    return "Failed"
+
+
+def score_model_response(text: str, elapsed_seconds: float) -> tuple[int, list[str]]:
+    """
+    Simple local scoring. No extra AI call is used.
+
+    Score rewards:
+    - Useful length
+    - Required business/technical sections
+    - Concrete MVP advice
+    - Risks/tradeoffs
+    - Budget/timeline awareness
+
+    Score penalizes:
+    - Too short
+    - Refusal/error-like output
+    - Generic answer
+    """
+
+    score = 0
+    reasons = []
+
+    cleaned = text.strip()
+    lower = cleaned.lower()
+    word_count = len(cleaned.split())
+
+    if word_count >= 180:
+        score += 20
+        reasons.append("Good detail")
+    elif word_count >= 100:
+        score += 12
+        reasons.append("Acceptable detail")
+    elif word_count >= 50:
+        score += 6
+        reasons.append("Short but usable")
+    else:
+        score -= 15
+        reasons.append("Too short")
+
+    section_keywords = [
+        "business",
+        "technical",
+        "mvp",
+        "risk",
+        "roadmap",
+        "budget",
+        "timeline",
+        "users",
+        "revenue",
+        "launch",
+    ]
+
+    matched_keywords = [keyword for keyword in section_keywords if keyword in lower]
+    score += len(matched_keywords) * 5
+
+    if matched_keywords:
+        reasons.append(f"Covers {len(matched_keywords)} key areas")
+
+    practical_terms = [
+        "first",
+        "build",
+        "start",
+        "validate",
+        "pilot",
+        "vendor",
+        "payment",
+        "dashboard",
+        "tracking",
+        "support",
+    ]
+
+    practical_matches = [term for term in practical_terms if term in lower]
+    score += min(len(practical_matches) * 3, 24)
+
+    if practical_matches:
+        reasons.append("Practical implementation advice")
+
+    if "$10k" in cleaned or "$25k" in cleaned or "3-4" in cleaned or "3–4" in cleaned:
+        score += 10
+        reasons.append("Uses budget/timeline context")
+
+    if "campus" in lower and "food" in lower:
+        score += 8
+        reasons.append("Understands project context")
+
+    if "error" in lower or "cannot" in lower or "unable" in lower:
+        score -= 10
+        reasons.append("Contains weak/error-like wording")
+
+    if word_count < 80 and "generic" in lower:
+        score -= 10
+        reasons.append("Generic output")
+
+    if elapsed_seconds <= 10:
+        score += 8
+        reasons.append("Fast response")
+    elif elapsed_seconds <= 25:
+        score += 4
+        reasons.append("Reasonable speed")
+    else:
+        score -= 5
+        reasons.append("Slow response")
+
+    score = max(0, min(100, score))
+
+    if not reasons:
+        reasons.append("No strong quality signals")
+
+    return score, reasons
+
+
+def make_project_prompt(
+    project_name: str,
+    project_type: str,
+    budget_range: str,
+    timeline: str,
+    target_users: str,
+    business_goal: str,
+    project_description: str,
+    main_problem: str,
+    must_have_features: str,
+) -> str:
+    return f"""
+Analyze this client project.
+
+Project Name: {project_name}
+Project Type: {project_type}
+Budget Range: {budget_range}
+Timeline: {timeline}
+
+Target Users:
+{target_users}
+
+Main Business Goal:
+{business_goal}
+
+Project Description:
+{project_description}
+
+Problem Solved:
+{main_problem}
+
+Must-Have Features:
+{must_have_features}
+
+Instructions:
+- Give practical, beginner-friendly advice.
+- Focus on realistic delivery within the budget and timeline.
+- Be honest about risks and tradeoffs.
+- Recommend an MVP-first approach.
+- Format the answer clearly with headings and bullet points.
+"""
+
+
+# =========================
+# Model Test + Ranking
+# =========================
+
+def test_model_with_sample(
+    model_id: str,
+    project_prompt: str,
+    temperature: float = 0.3,
+) -> dict:
+    """
+    Tests one model using a short agency-style prompt.
+    Returns status, sample output, score, and timing.
+    """
+
+    if client is None:
+        raise ValueError("OPENROUTER_API_KEY is missing. Please add it to your .env file.")
+
+    test_system_prompt = """
+You are testing whether this model is good for an AI Services Agency app.
+
+Return a concise but useful mini-report with exactly these headings:
+
+# Business
+# Technical
+# MVP
+# Risks
+# Recommendation
+
+Keep it practical and specific to the user's project.
+"""
+
+    mini_prompt = f"""
+Create a short test analysis for this project.
+
+{project_prompt}
+
+Limit the response to 250-400 words.
+"""
+
+    started_at = time.time()
+
+    try:
+        response = client.chat.completions.create(
+            model=model_id,
+            messages=[
+                {"role": "system", "content": test_system_prompt},
+                {"role": "user", "content": mini_prompt},
+            ],
+            temperature=temperature,
+            max_tokens=700,
+        )
+
+        elapsed = time.time() - started_at
+        output = response.choices[0].message.content or ""
+        score, reasons = score_model_response(output, elapsed)
+
+        return {
+            "model": model_id,
+            "status": "Working",
+            "score": score,
+            "seconds": round(elapsed, 2),
+            "reason": ", ".join(reasons),
+            "sample": output,
+            "error": "",
+        }
+
+    except Exception as e:
+        elapsed = time.time() - started_at
+        error_text = str(e)
+        error_type = classify_openrouter_error(error_text)
+
+        return {
+            "model": model_id,
+            "status": error_type,
+            "score": 0,
+            "seconds": round(elapsed, 2),
+            "reason": error_type,
+            "sample": "",
+            "error": error_text,
+        }
+
+
+# =========================
+# Full Report Generator
 # =========================
 
 def generate_full_report(
@@ -76,10 +350,6 @@ def generate_full_report(
 ) -> str:
     """
     Generates the full agency report in ONE OpenRouter request.
-
-    This is better for free OpenRouter models because it avoids making
-    5 separate API calls for CEO, CTO, Product Manager, Developer,
-    and Client Success Manager.
     """
 
     if client is None:
@@ -155,19 +425,27 @@ Important rules:
     response = client.chat.completions.create(
         model=selected_model,
         messages=[
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {
-                "role": "user",
-                "content": project_prompt,
-            },
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": project_prompt},
         ],
         temperature=temperature,
     )
 
     return response.choices[0].message.content
+
+
+# =========================
+# Session State
+# =========================
+
+if "benchmark_results" not in st.session_state:
+    st.session_state.benchmark_results = []
+
+if "best_model" not in st.session_state:
+    st.session_state.best_model = DEFAULT_MODEL
+
+if "latest_report" not in st.session_state:
+    st.session_state.latest_report = ""
 
 
 # =========================
@@ -177,7 +455,9 @@ Important rules:
 st.sidebar.title("⚙️ Settings")
 
 default_index = 0
-if DEFAULT_MODEL in AVAILABLE_MODELS:
+if st.session_state.best_model in AVAILABLE_MODELS:
+    default_index = AVAILABLE_MODELS.index(st.session_state.best_model)
+elif DEFAULT_MODEL in AVAILABLE_MODELS:
     default_index = AVAILABLE_MODELS.index(DEFAULT_MODEL)
 
 selected_model = st.sidebar.selectbox(
@@ -203,12 +483,15 @@ st.sidebar.markdown("---")
 st.sidebar.write("Current model:")
 st.sidebar.code(selected_model)
 
+st.sidebar.write("Best ranked model:")
+st.sidebar.code(st.session_state.best_model)
+
 st.sidebar.write("Temperature:")
 st.sidebar.code(str(selected_temperature))
 
 st.sidebar.markdown("---")
 st.sidebar.info(
-    "This version uses one OpenRouter call to reduce free-model rate-limit errors."
+    "Use benchmark mode to test models with a short prompt before generating the full report."
 )
 
 
@@ -219,7 +502,7 @@ st.sidebar.info(
 st.title("🤖 AI Services Agency")
 
 st.write(
-    "Enter a project idea and generate a full agency-style report with CEO, CTO, Product Manager, Developer, and Client Success sections."
+    "Enter a project idea, benchmark free OpenRouter models, rank their outputs, then generate a full agency-style report with the best model."
 )
 
 if not OPENROUTER_API_KEY:
@@ -321,68 +604,181 @@ with st.form("project_form"):
         height=100,
     )
 
-    submitted = st.form_submit_button("Analyze Project")
+    col_a, col_b, col_c = st.columns(3)
+
+    with col_a:
+        benchmark_submitted = st.form_submit_button("Test and Rank Models")
+
+    with col_b:
+        report_submitted = st.form_submit_button("Generate Full Report")
+
+    with col_c:
+        best_report_submitted = st.form_submit_button("Use Best Model for Report")
 
 
 # =========================
-# Run Analysis
+# Validate Inputs
 # =========================
 
-if submitted:
+def validate_project_inputs() -> bool:
     if not project_name.strip():
         st.error("Please enter the project name.")
-        st.stop()
+        return False
 
     if not project_description.strip():
         st.error("Please enter the project description.")
-        st.stop()
+        return False
 
     if not main_problem.strip():
         st.error("Please enter the problem this project solves.")
-        st.stop()
+        return False
 
     if not must_have_features.strip():
         st.error("Please enter the must-have features.")
+        return False
+
+    return True
+
+
+# =========================
+# Build Prompt
+# =========================
+
+project_prompt = make_project_prompt(
+    project_name=project_name,
+    project_type=project_type,
+    budget_range=budget_range,
+    timeline=timeline,
+    target_users=target_users,
+    business_goal=business_goal,
+    project_description=project_description,
+    main_problem=main_problem,
+    must_have_features=must_have_features,
+)
+
+
+# =========================
+# Benchmark Models
+# =========================
+
+if benchmark_submitted:
+    if not validate_project_inputs():
         st.stop()
 
-    project_prompt = f"""
-Analyze this client project.
+    st.markdown("---")
+    st.subheader("Model Benchmark Results")
 
-Project Name: {project_name}
-Project Type: {project_type}
-Budget Range: {budget_range}
-Timeline: {timeline}
+    st.warning(
+        "This will call each selected model once. Free models may still return 429 rate-limit errors."
+    )
 
-Target Users:
-{target_users}
+    selected_models_to_test = st.multiselect(
+        "Models to test",
+        AVAILABLE_MODELS,
+        default=RECOMMENDED_SAFE_DEFAULTS,
+    )
 
-Main Business Goal:
-{business_goal}
+    if not selected_models_to_test:
+        st.error("Please select at least one model to test.")
+        st.stop()
 
-Project Description:
-{project_description}
+    results = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-Problem Solved:
-{main_problem}
+    for index, model_id in enumerate(selected_models_to_test, start=1):
+        status_text.write(f"Testing {model_id}...")
 
-Must-Have Features:
-{must_have_features}
+        result = test_model_with_sample(
+            model_id=model_id,
+            project_prompt=project_prompt,
+            temperature=0.3,
+        )
 
-Instructions:
-- Give practical, beginner-friendly advice.
-- Focus on realistic delivery within the budget and timeline.
-- Be honest about risks and tradeoffs.
-- Recommend an MVP-first approach.
-- Format the answer clearly with headings and bullet points.
-"""
+        results.append(result)
+        progress_bar.progress(index / len(selected_models_to_test))
+
+        # Small delay helps avoid immediate burst rate limits.
+        time.sleep(1)
+
+    ranked_results = sorted(
+        results,
+        key=lambda item: (item["score"], -item["seconds"]),
+        reverse=True,
+    )
+
+    st.session_state.benchmark_results = ranked_results
+
+    working_results = [item for item in ranked_results if item["status"] == "Working"]
+
+    if working_results:
+        st.session_state.best_model = working_results[0]["model"]
+        st.success(f"Best working model: {st.session_state.best_model}")
+    else:
+        st.error("No working model found in this benchmark run.")
+
+    status_text.success("Benchmark complete.")
+
+
+# =========================
+# Display Benchmark Results
+# =========================
+
+if st.session_state.benchmark_results:
+    st.markdown("---")
+    st.subheader("Ranked Models")
+
+    table_rows = []
+
+    for rank, item in enumerate(st.session_state.benchmark_results, start=1):
+        table_rows.append(
+            {
+                "Rank": rank,
+                "Model": item["model"],
+                "Status": item["status"],
+                "Score": item["score"],
+                "Seconds": item["seconds"],
+                "Reason": item["reason"],
+            }
+        )
+
+    st.dataframe(table_rows, use_container_width=True)
+
+    st.subheader("Model Samples")
+
+    for rank, item in enumerate(st.session_state.benchmark_results, start=1):
+        with st.expander(f"#{rank} — {item['model']} — {item['status']} — Score {item['score']}"):
+            if item["sample"]:
+                st.markdown(item["sample"])
+
+            if item["error"]:
+                st.code(item["error"])
+
+
+# =========================
+# Generate Full Report
+# =========================
+
+should_generate_report = report_submitted or best_report_submitted
+
+if should_generate_report:
+    if not validate_project_inputs():
+        st.stop()
+
+    model_for_report = selected_model
+
+    if best_report_submitted:
+        model_for_report = st.session_state.best_model
 
     st.markdown("---")
     st.subheader("Analysis Results")
+    st.write("Using model:")
+    st.code(model_for_report)
 
     with st.spinner("Generating full agency report..."):
         try:
             ai_report = generate_full_report(
-                selected_model=selected_model,
+                selected_model=model_for_report,
                 project_prompt=project_prompt,
                 temperature=selected_temperature,
             )
@@ -392,13 +788,14 @@ Instructions:
             st.code(str(e))
 
             st.warning(
-                "Try switching back to `nvidia/nemotron-3-super-120b-a12b:free`, because that model already worked in your earlier test."
+                "Run `Test and Rank Models` first, then use the best working model for the full report."
             )
 
             st.stop()
 
-    st.success("Analysis complete.")
+    st.session_state.latest_report = ai_report
 
+    st.success("Analysis complete.")
     st.markdown(ai_report)
 
     # =========================
@@ -411,7 +808,7 @@ Instructions:
 
 Generated: {report_date}
 
-Model Used: {selected_model}
+Model Used: {model_for_report}
 
 ---
 
