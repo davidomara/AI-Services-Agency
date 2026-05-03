@@ -13,11 +13,11 @@ from openai import OpenAI
 
 load_dotenv()
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", os.getenv("OPENROUTER_API_KEY"))
 
-DEFAULT_MODEL = os.getenv(
+DEFAULT_MODEL = st.secrets.get(
     "OPENROUTER_MODEL",
-    "nvidia/nemotron-3-super-120b-a12b:free"
+    os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
 )
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
