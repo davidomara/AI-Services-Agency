@@ -25,14 +25,15 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # =========================
 # Available OpenRouter Models
 # =========================
+# Keep Nemotron first because it already worked for you.
+# Free models can still be rate-limited depending on OpenRouter/provider load.
 
 AVAILABLE_MODELS = [
     "nvidia/nemotron-3-super-120b-a12b:free",
-    "qwen/qwen3-next-80b-a3b-instruct:free",
-    "google/gemma-3-27b-it:free",
+    "qwen/qwen3-coder:free",
+    "minimax/minimax-m2.5:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "google/gemma-3-4b-it:free",
-
 ]
 
 
@@ -65,28 +66,98 @@ client = get_openrouter_client()
 
 
 # =========================
-# Agent Function
+# Report Generator
 # =========================
 
-def ask_agent(
+def generate_full_report(
     selected_model: str,
-    agent_instructions: str,
     project_prompt: str,
     temperature: float = 0.5,
 ) -> str:
     """
-    Sends a request to OpenRouter using the OpenAI-compatible SDK.
+    Generates the full agency report in ONE OpenRouter request.
+
+    This is better for free OpenRouter models because it avoids making
+    5 separate API calls for CEO, CTO, Product Manager, Developer,
+    and Client Success Manager.
     """
 
     if client is None:
         raise ValueError("OPENROUTER_API_KEY is missing. Please add it to your .env file.")
+
+    system_prompt = """
+You are an AI Services Agency made of five expert roles:
+
+1. CEO
+2. CTO
+3. Product Manager
+4. Lead Developer
+5. Client Success Manager
+
+Generate ONE complete agency report.
+
+Use these exact Markdown sections:
+
+# CEO Analysis
+Include:
+- Executive summary
+- Business value
+- Target market
+- Revenue opportunity
+- Business risks
+- Viability recommendation
+
+# CTO Technical Plan
+Include:
+- Recommended architecture
+- Suggested technology stack
+- Technical risks
+- Scalability requirements
+- Practical technical build plan
+
+# Product Manager Roadmap
+Include:
+- Target users
+- Core product features
+- MVP features
+- Features to delay
+- Realistic roadmap
+- Product-market fit analysis
+
+# Developer Implementation Plan
+Include:
+- Frontend plan
+- Backend plan
+- Database plan
+- API/payment plan
+- Step-by-step development tasks
+- Implementation risks
+
+# Client Success Strategy
+Include:
+- Client expectations
+- Communication plan
+- Client-side risks
+- Launch strategy
+- Support strategy
+- Go-to-market plan
+
+Important rules:
+- Be practical and beginner-friendly.
+- Focus on realistic delivery within the budget and timeline.
+- Be honest about tradeoffs.
+- Recommend an MVP-first approach.
+- Use headings, bullet points, and tables where useful.
+- Do not include generic hype.
+- Do not mention that you are an AI model.
+"""
 
     response = client.chat.completions.create(
         model=selected_model,
         messages=[
             {
                 "role": "system",
-                "content": agent_instructions,
+                "content": system_prompt,
             },
             {
                 "role": "user",
@@ -97,94 +168,6 @@ def ask_agent(
     )
 
     return response.choices[0].message.content
-
-
-# =========================
-# Agent Instructions
-# =========================
-
-AGENTS = {
-    "CEO Analysis": {
-        "temperature": 0.5,
-        "instructions": """
-You are the CEO of an AI software agency.
-
-Your job is to:
-1. Evaluate the business value of the project.
-2. Identify the target market.
-3. Explain the revenue opportunity.
-4. Identify business risks.
-5. Recommend whether the project is viable.
-6. Give a clear executive summary.
-
-Write in a practical, business-focused style.
-Use headings, bullet points, and clear recommendations.
-""",
-    },
-    "CTO Technical Plan": {
-        "temperature": 0.4,
-        "instructions": """
-You are the CTO of an AI software agency.
-
-Your job is to:
-1. Recommend the best technical architecture.
-2. Suggest the technology stack.
-3. Identify technical risks.
-4. Explain scalability requirements.
-5. Give a practical technical build plan.
-
-Write in a way that is useful for a beginner developer and a business client.
-Avoid unnecessary complexity.
-""",
-    },
-    "Product Manager Roadmap": {
-        "temperature": 0.4,
-        "instructions": """
-You are the Product Manager of an AI software agency.
-
-Your job is to:
-1. Define the target users.
-2. List core product features.
-3. Prioritize MVP features.
-4. Create a realistic product roadmap.
-5. Explain product-market fit.
-6. Identify what should be delayed until later.
-
-Be practical and focus on what should be built first.
-""",
-    },
-    "Developer Implementation Plan": {
-        "temperature": 0.3,
-        "instructions": """
-You are the Lead Developer of an AI software agency.
-
-Your job is to:
-1. Break the project into development tasks.
-2. Recommend frontend, backend, database, and API choices.
-3. Estimate development effort.
-4. Identify implementation challenges.
-5. Suggest a practical step-by-step build plan.
-
-Write for a beginner developer who needs clear implementation guidance.
-""",
-    },
-    "Client Success Strategy": {
-        "temperature": 0.5,
-        "instructions": """
-You are the Client Success Manager of an AI software agency.
-
-Your job is to:
-1. Explain project expectations to the client.
-2. Create a communication plan.
-3. Identify client-side risks.
-4. Recommend launch and support strategy.
-5. Suggest a go-to-market plan.
-
-Write in a professional but beginner-friendly style.
-Focus on client satisfaction and project delivery.
-""",
-    },
-}
 
 
 # =========================
@@ -210,19 +193,22 @@ temperature_mode = st.sidebar.selectbox(
 )
 
 if temperature_mode == "More Precise":
-    temperature_adjustment = -0.1
+    selected_temperature = 0.3
 elif temperature_mode == "More Creative":
-    temperature_adjustment = 0.2
+    selected_temperature = 0.7
 else:
-    temperature_adjustment = 0.0
+    selected_temperature = 0.5
 
 st.sidebar.markdown("---")
 st.sidebar.write("Current model:")
 st.sidebar.code(selected_model)
 
+st.sidebar.write("Temperature:")
+st.sidebar.code(str(selected_temperature))
+
 st.sidebar.markdown("---")
 st.sidebar.info(
-    "This app uses OpenRouter through the OpenAI-compatible Python SDK."
+    "This version uses one OpenRouter call to reduce free-model rate-limit errors."
 )
 
 
@@ -231,8 +217,9 @@ st.sidebar.info(
 # =========================
 
 st.title("🤖 AI Services Agency")
+
 st.write(
-    "Enter a project idea and let an AI agency team analyze it from business, technical, product, development, and client-success angles."
+    "Enter a project idea and generate a full agency-style report with CEO, CTO, Product Manager, Developer, and Client Success sections."
 )
 
 if not OPENROUTER_API_KEY:
@@ -392,56 +379,27 @@ Instructions:
     st.markdown("---")
     st.subheader("Analysis Results")
 
-    results = {}
-
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    total_agents = len(AGENTS)
-
-    for index, (agent_name, agent_config) in enumerate(AGENTS.items(), start=1):
-        status_text.write(f"Running {agent_name}...")
-
+    with st.spinner("Generating full agency report..."):
         try:
-            base_temperature = agent_config["temperature"]
-            final_temperature = max(
-                0.0,
-                min(1.0, base_temperature + temperature_adjustment),
-            )
-
-            result = ask_agent(
+            ai_report = generate_full_report(
                 selected_model=selected_model,
-                agent_instructions=agent_config["instructions"],
                 project_prompt=project_prompt,
-                temperature=final_temperature,
+                temperature=selected_temperature,
             )
-
-            results[agent_name] = result
 
         except Exception as e:
-            results[agent_name] = f"""
-Error while generating {agent_name}.
+            st.error("Something went wrong while generating the report.")
+            st.code(str(e))
 
-Details:
-{str(e)}
+            st.warning(
+                "Try switching back to `nvidia/nemotron-3-super-120b-a12b:free`, because that model already worked in your earlier test."
+            )
 
-Possible fixes:
-1. Check your OpenRouter API key.
-2. Try another free model from the sidebar.
-3. Wait and try again if the free model is rate-limited.
-4. Check your internet connection.
-"""
+            st.stop()
 
-        progress_bar.progress(index / total_agents)
+    st.success("Analysis complete.")
 
-    status_text.success("Analysis complete.")
-
-    tabs = st.tabs(list(results.keys()))
-
-    for tab, agent_name in zip(tabs, results.keys()):
-        with tab:
-            st.subheader(agent_name)
-            st.markdown(results[agent_name])
+    st.markdown(ai_report)
 
     # =========================
     # Build Downloadable Report
@@ -491,15 +449,7 @@ Model Used: {selected_model}
 
 ---
 
-"""
-
-    for agent_name, content in results.items():
-        full_report += f"""## {agent_name}
-
-{content}
-
----
-
+{ai_report}
 """
 
     st.markdown("---")
