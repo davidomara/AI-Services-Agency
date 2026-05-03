@@ -49,7 +49,7 @@ RECOMMENDED_SAFE_DEFAULTS = [
 # =========================
 
 st.set_page_config(
-    page_title="AI Services Agency",
+    page_title="Nord AI Agency",
     page_icon="🤖",
     layout="wide",
 )
@@ -321,7 +321,7 @@ def test_model_with_sample(
         raise ValueError("OPENROUTER_API_KEY is missing. Please add it to your .env file.")
 
     test_system_prompt = """
-You are testing whether this model is good for an AI Services Agency app.
+You are testing whether this model is good for an Nord AI Agency app.
 
 Return a concise but useful mini-report with exactly these headings:
 
@@ -403,7 +403,7 @@ def generate_full_report(
         raise ValueError("OPENROUTER_API_KEY is missing. Please add it to your .env file.")
 
     system_prompt = """
-You are an AI Services Agency made of five expert roles:
+You are an Nord AI Agency made of five expert roles:
 
 1. CEO
 2. CTO
@@ -547,7 +547,7 @@ st.sidebar.info(
 # Main UI
 # =========================
 
-st.title("🤖 AI Services Agency")
+st.title("🤖 Nord AI Agency")
 
 st.write(
     "Enter a project idea, benchmark free OpenRouter models, rank their outputs, then generate a full agency-style report with the best model."
@@ -858,7 +858,7 @@ if should_generate_report:
 
     report_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    full_report = f"""# AI Services Agency Report
+    full_report = f"""# Nord AI Agency Report
 
 Generated: {report_date}
 

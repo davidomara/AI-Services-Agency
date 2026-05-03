@@ -20,5 +20,8 @@ Add your deployed Streamlit link here:
 
 ```text
 https://nord-agents.streamlit.app
+```
+
+## Documentation
 
 - [Deployment Guide](docs/DEPLOYMENT.md)
