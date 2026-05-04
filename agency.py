@@ -100,6 +100,29 @@ client = get_openrouter_client()
 
 
 # =========================
+# Session State
+# =========================
+
+if "ai_report" not in st.session_state:
+    st.session_state.ai_report = ""
+
+if "full_report" not in st.session_state:
+    st.session_state.full_report = ""
+
+if "pdf_report" not in st.session_state:
+    st.session_state.pdf_report = None
+
+if "attempt_logs" not in st.session_state:
+    st.session_state.attempt_logs = []
+
+if "report_generated" not in st.session_state:
+    st.session_state.report_generated = False
+
+if "last_project_name" not in st.session_state:
+    st.session_state.last_project_name = "nord_ai_agency_report"
+
+
+# =========================
 # Prompt Helpers
 # =========================
 
@@ -467,22 +490,37 @@ def normalize_text_for_pdf(text: str) -> str:
     """
     Replaces characters that often render badly in ReportLab's default fonts.
     """
-    return (
-        text.replace("–", "-")
-        .replace("—", "-")
-        .replace("−", "-")
-        .replace("-", "-")
-        .replace("‒", "-")
-        .replace("■", "-")
-        .replace("“", '"')
-        .replace("”", '"')
-        .replace("’", "'")
-        .replace("‘", "'")
-        .replace("•", "-")
-        .replace("≈", "~")
-        .replace("≥", ">=")
-        .replace("≤", "<=")
-    )
+    replacements = {
+        "–": "-",
+        "—": "-",
+        "−": "-",
+        "‒": "-",
+        "‐": "-",
+        "-": "-",
+        "-": "-",
+        "■": "-",
+        "●": "-",
+        "•": "-",
+        "“": '"',
+        "”": '"',
+        "’": "'",
+        "‘": "'",
+        "…": "...",
+        "≈": "~",
+        "≥": ">=",
+        "≤": "<=",
+        "→": "->",
+        "←": "<-",
+        "×": "x",
+        "✓": "Yes",
+        "✅": "Yes",
+        "❌": "No",
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    return text
 
 
 def escape_pdf_text(text: str) -> str:
@@ -507,6 +545,35 @@ def clean_markdown_for_pdf(text: str) -> str:
     )
 
 
+def add_pdf_footer(canvas, doc):
+    """
+    Adds page number and footer branding to each PDF page.
+    """
+    canvas.saveState()
+
+    page_number = canvas.getPageNumber()
+    footer_text = f"Nord AI Agency | Page {page_number}"
+
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(colors.HexColor("#555555"))
+    canvas.drawRightString(
+        A4[0] - 0.65 * inch,
+        0.35 * inch,
+        footer_text,
+    )
+
+    canvas.setStrokeColor(colors.HexColor("#D9E2F2"))
+    canvas.setLineWidth(0.4)
+    canvas.line(
+        0.65 * inch,
+        0.5 * inch,
+        A4[0] - 0.65 * inch,
+        0.5 * inch,
+    )
+
+    canvas.restoreState()
+
+
 def markdown_to_pdf_bytes(
     markdown_text: str,
     title: str = "Nord AI Agency Report",
@@ -527,8 +594,6 @@ def markdown_to_pdf_bytes(
     - ### headings
     - bullet lines
     - normal paragraphs
-
-    Designed for stable Streamlit Cloud PDF export.
     """
 
     markdown_text = normalize_text_for_pdf(markdown_text)
@@ -698,8 +763,32 @@ def markdown_to_pdf_bytes(
 
     lines = markdown_text.splitlines()
 
+    skip_sections = {
+        "Generated:",
+        "Version:",
+    }
+
+    skip_headings = {
+        "## Client Details",
+        "## Model Order",
+    }
+
+    skip_until_next_hr = False
+
     for raw_line in lines:
         line = raw_line.strip()
+
+        if line in skip_headings:
+            skip_until_next_hr = True
+            continue
+
+        if skip_until_next_hr:
+            if line == "---":
+                skip_until_next_hr = False
+            continue
+
+        if any(line.startswith(prefix) for prefix in skip_sections):
+            continue
 
         if not line:
             story.append(Spacer(1, 0.045 * inch))
@@ -711,7 +800,7 @@ def markdown_to_pdf_bytes(
 
         line = clean_markdown_for_pdf(line)
 
-        # Avoid duplicating top title too loudly after branded header.
+        # Avoid duplicating top title after branded header.
         if line.startswith("# Nord AI Agency Report"):
             continue
 
@@ -745,7 +834,11 @@ def markdown_to_pdf_bytes(
 
         story.append(Paragraph(escape_pdf_text(line), body_style))
 
-    doc.build(story)
+    doc.build(
+        story,
+        onFirstPage=add_pdf_footer,
+        onLaterPages=add_pdf_footer,
+    )
 
     pdf_value = buffer.getvalue()
     buffer.close()
@@ -754,7 +847,7 @@ def markdown_to_pdf_bytes(
 
 
 # =========================
-# UI
+# UI Header
 # =========================
 
 header_col1, header_col2 = st.columns([1, 4])
@@ -780,6 +873,10 @@ if not OPENROUTER_API_KEY:
     )
     st.stop()
 
+
+# =========================
+# Sidebar
+# =========================
 
 with st.sidebar:
     if LOGO_PATH.exists():
@@ -1029,23 +1126,6 @@ if submitted:
                 st.code(str(e))
             st.stop()
 
-    st.success("Report generated successfully.")
-    st.markdown(ai_report)
-
-    with st.expander("Model attempt log"):
-        for log in attempt_logs:
-            status = log["status"]
-            section = log["section"]
-            model = log["model"]
-
-            if status == "success":
-                st.success(f"{section}: {model}")
-            else:
-                st.warning(f"{section}: {model} failed — {status}")
-
-                if log["error"]:
-                    st.code(log["error"])
-
     report_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     model_order_text = "\n".join(
@@ -1056,7 +1136,7 @@ if submitted:
 
 Generated: {report_date}
 
-Version: v1.1 — Lead Capture
+Version: v1.1 - Lead Capture
 
 ---
 
@@ -1125,22 +1205,75 @@ Version: v1.1 — Lead Capture
         report_date=report_date,
     )
 
+    st.session_state.ai_report = ai_report
+    st.session_state.full_report = full_report
+    st.session_state.pdf_report = pdf_report
+    st.session_state.attempt_logs = attempt_logs
+    st.session_state.report_generated = True
+    st.session_state.last_project_name = project_name
+
+    st.success("Report generated successfully.")
+
+
+# =========================
+# Persistent Report Display
+# =========================
+
+if st.session_state.report_generated and st.session_state.full_report:
+    st.markdown("---")
+    st.subheader("Generated Report")
+
+    st.markdown(st.session_state.ai_report)
+
+    with st.expander("Model attempt log"):
+        for log in st.session_state.attempt_logs:
+            status = log["status"]
+            section = log["section"]
+            model = log["model"]
+
+            if status == "success":
+                st.success(f"{section}: {model}")
+            else:
+                st.warning(f"{section}: {model} failed - {status}")
+
+                if log["error"]:
+                    st.code(log["error"])
+
     st.markdown("---")
 
-    col_download_1, col_download_2 = st.columns(2)
+    col_download_1, col_download_2, col_clear = st.columns(3)
+
+    safe_project_name = (
+        st.session_state.last_project_name.lower()
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("\\", "_")
+    )
 
     with col_download_1:
         st.download_button(
             label="Download Markdown Report",
-            data=full_report,
-            file_name="nord_ai_agency_report.md",
+            data=st.session_state.full_report,
+            file_name=f"{safe_project_name}_nord_ai_agency_report.md",
             mime="text/markdown",
+            key="download_markdown_report",
         )
 
     with col_download_2:
         st.download_button(
             label="Download PDF Report",
-            data=pdf_report,
-            file_name="nord_ai_agency_report.pdf",
+            data=st.session_state.pdf_report,
+            file_name=f"{safe_project_name}_nord_ai_agency_report.pdf",
             mime="application/pdf",
+            key="download_pdf_report",
         )
+
+    with col_clear:
+        if st.button("Clear Report"):
+            st.session_state.ai_report = ""
+            st.session_state.full_report = ""
+            st.session_state.pdf_report = None
+            st.session_state.attempt_logs = []
+            st.session_state.report_generated = False
+            st.session_state.last_project_name = "nord_ai_agency_report"
+            st.rerun()
