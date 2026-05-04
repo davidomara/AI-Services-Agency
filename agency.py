@@ -131,6 +131,10 @@ User request:
 
 
 def make_project_prompt(
+    client_name: str,
+    client_email: str,
+    company_name: str,
+    industry: str,
     project_name: str,
     project_type: str,
     budget_range: str,
@@ -142,6 +146,22 @@ def make_project_prompt(
     must_have_features: str,
 ) -> str:
     return f"""
+Client Details:
+
+Client Name:
+{client_name}
+
+Client Email:
+{client_email}
+
+Company Name:
+{company_name}
+
+Industry:
+{industry}
+
+Project Details:
+
 Project Name:
 {project_name}
 
@@ -327,11 +347,12 @@ Rules:
 - Focus on realistic delivery within the stated budget and timeline.
 - Be honest about risks and tradeoffs.
 - Recommend an MVP-first approach.
+- Use the client details when useful, but do not expose private contact information unnecessarily in analysis text.
 - Do not mention that you are an AI model.
 """
 
     user_prompt = f"""
-Client project details:
+Client and project details:
 
 {project_prompt}
 
@@ -651,12 +672,42 @@ with st.sidebar:
     st.write("Temperature:")
     st.code(str(selected_temperature))
 
+    st.markdown("---")
+    st.caption("Version: v1.1 — Lead Capture")
+
 
 # =========================
 # Form
 # =========================
 
 with st.form("project_form"):
+    st.subheader("Client Details")
+
+    lead_col1, lead_col2 = st.columns(2)
+
+    with lead_col1:
+        client_name = st.text_input(
+            "Client Name",
+            placeholder="Example: David Omara",
+        )
+
+        company_name = st.text_input(
+            "Company Name",
+            placeholder="Example: Nord AI Agency",
+        )
+
+    with lead_col2:
+        client_email = st.text_input(
+            "Client Email",
+            placeholder="Example: client@example.com",
+        )
+
+        industry = st.text_input(
+            "Industry",
+            placeholder="Example: Food delivery, education, fintech, healthcare",
+        )
+
+    st.markdown("---")
     st.subheader("Project Details")
 
     col1, col2 = st.columns(2)
@@ -746,6 +797,26 @@ with st.form("project_form"):
 # =========================
 
 if submitted:
+    if not client_name.strip():
+        st.error("Please enter the client name.")
+        st.stop()
+
+    if not client_email.strip():
+        st.error("Please enter the client email.")
+        st.stop()
+
+    if "@" not in client_email or "." not in client_email:
+        st.error("Please enter a valid client email address.")
+        st.stop()
+
+    if not company_name.strip():
+        st.error("Please enter the company name.")
+        st.stop()
+
+    if not industry.strip():
+        st.error("Please enter the industry.")
+        st.stop()
+
     if not project_name.strip():
         st.error("Please enter the project name.")
         st.stop()
@@ -767,6 +838,10 @@ if submitted:
         st.stop()
 
     project_prompt = make_project_prompt(
+        client_name=client_name,
+        client_email=client_email,
+        company_name=company_name,
+        industry=industry,
         project_name=project_name,
         project_type=project_type,
         budget_range=budget_range,
@@ -822,6 +897,22 @@ if submitted:
     full_report = f"""# Nord AI Agency Report
 
 Generated: {report_date}
+
+Version: v1.1 — Lead Capture
+
+---
+
+## Client Details
+
+**Client Name:** {client_name}
+
+**Client Email:** {client_email}
+
+**Company Name:** {company_name}
+
+**Industry:** {industry}
+
+---
 
 ## Model Order
 
