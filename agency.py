@@ -1,16 +1,18 @@
 import os
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
 # =========================
@@ -44,6 +46,9 @@ def get_config_value(key: str, default: str | None = None) -> str | None:
 
     return os.getenv(key, default)
 
+
+APP_DIR = Path(__file__).parent
+LOGO_PATH = APP_DIR / "assets" / "nord_logo.png"
 
 OPENROUTER_API_KEY = get_config_value("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -455,8 +460,30 @@ def generate_report_with_fallbacks(
 
 
 # =========================
-# PDF Export
+# PDF Export Helpers
 # =========================
+
+def normalize_text_for_pdf(text: str) -> str:
+    """
+    Replaces characters that often render badly in ReportLab's default fonts.
+    """
+    return (
+        text.replace("–", "-")
+        .replace("—", "-")
+        .replace("−", "-")
+        .replace("-", "-")
+        .replace("‒", "-")
+        .replace("■", "-")
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("’", "'")
+        .replace("‘", "'")
+        .replace("•", "-")
+        .replace("≈", "~")
+        .replace("≥", ">=")
+        .replace("≤", "<=")
+    )
+
 
 def escape_pdf_text(text: str) -> str:
     """
@@ -483,79 +510,191 @@ def clean_markdown_for_pdf(text: str) -> str:
 def markdown_to_pdf_bytes(
     markdown_text: str,
     title: str = "Nord AI Agency Report",
+    logo_path: Path | None = None,
+    client_name: str = "",
+    company_name: str = "",
+    project_name: str = "",
+    report_date: str = "",
 ) -> bytes:
     """
-    Converts simple Markdown into a PDF file.
+    Converts simple Markdown into a branded PDF file.
 
     Supports:
+    - Logo header
+    - Cover details section
     - # headings
     - ## headings
     - ### headings
     - bullet lines
     - normal paragraphs
+
+    Designed for stable Streamlit Cloud PDF export.
     """
+
+    markdown_text = normalize_text_for_pdf(markdown_text)
 
     buffer = BytesIO()
 
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
-        rightMargin=0.7 * inch,
-        leftMargin=0.7 * inch,
-        topMargin=0.7 * inch,
-        bottomMargin=0.7 * inch,
+        rightMargin=0.65 * inch,
+        leftMargin=0.65 * inch,
+        topMargin=0.55 * inch,
+        bottomMargin=0.6 * inch,
     )
 
     styles = getSampleStyleSheet()
 
+    brand_blue = colors.HexColor("#0057B8")
+    brand_navy = colors.HexColor("#111A4D")
+    brand_light = colors.HexColor("#F3F6FB")
+    brand_border = colors.HexColor("#D9E2F2")
+    brand_dark = colors.HexColor("#111111")
+    muted_text = colors.HexColor("#555555")
+
     title_style = ParagraphStyle(
-        "CustomTitle",
+        "NordTitle",
         parent=styles["Title"],
-        fontSize=20,
-        leading=24,
-        spaceAfter=16,
+        fontSize=21,
+        leading=26,
+        spaceAfter=6,
         alignment=TA_LEFT,
+        textColor=brand_blue,
+    )
+
+    subtitle_style = ParagraphStyle(
+        "NordSubtitle",
+        parent=styles["BodyText"],
+        fontSize=10,
+        leading=14,
+        spaceAfter=8,
+        textColor=brand_dark,
     )
 
     heading1_style = ParagraphStyle(
-        "CustomHeading1",
+        "NordHeading1",
         parent=styles["Heading1"],
-        fontSize=16,
-        leading=20,
+        fontSize=15,
+        leading=19,
         spaceBefore=14,
-        spaceAfter=8,
+        spaceAfter=7,
+        textColor=brand_navy,
     )
 
     heading2_style = ParagraphStyle(
-        "CustomHeading2",
+        "NordHeading2",
         parent=styles["Heading2"],
-        fontSize=13,
-        leading=16,
-        spaceBefore=10,
-        spaceAfter=6,
+        fontSize=12,
+        leading=15,
+        spaceBefore=9,
+        spaceAfter=5,
+        textColor=brand_blue,
     )
 
     body_style = ParagraphStyle(
-        "CustomBody",
+        "NordBody",
         parent=styles["BodyText"],
-        fontSize=10,
-        leading=14,
-        spaceAfter=6,
+        fontSize=9.5,
+        leading=13,
+        spaceAfter=5,
+        textColor=brand_dark,
     )
 
     bullet_style = ParagraphStyle(
-        "CustomBullet",
+        "NordBullet",
         parent=styles["BodyText"],
-        fontSize=10,
-        leading=14,
-        leftIndent=14,
+        fontSize=9.5,
+        leading=13,
+        leftIndent=16,
         firstLineIndent=-8,
         spaceAfter=4,
+        textColor=brand_dark,
+    )
+
+    small_style = ParagraphStyle(
+        "NordSmall",
+        parent=styles["BodyText"],
+        fontSize=8,
+        leading=10,
+        spaceAfter=4,
+        textColor=muted_text,
     )
 
     story = []
-    story.append(Paragraph(escape_pdf_text(title), title_style))
-    story.append(Spacer(1, 0.15 * inch))
+
+    # Brand header
+    logo_cell = ""
+    if logo_path and logo_path.exists():
+        logo_cell = Image(str(logo_path), width=1.55 * inch, height=1.05 * inch)
+
+    header_table = Table(
+        [
+            [
+                logo_cell,
+                Paragraph(
+                    "<b>Nord AI Agency</b><br/>Project Strategy Report",
+                    title_style,
+                ),
+            ]
+        ],
+        colWidths=[1.85 * inch, 4.75 * inch],
+    )
+
+    header_table.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+                ("LINEBELOW", (0, 0), (-1, -1), 1.25, brand_blue),
+            ]
+        )
+    )
+
+    story.append(header_table)
+    story.append(Spacer(1, 0.18 * inch))
+
+    # Cover/project summary box
+    cover_data = [
+        ["Project", project_name or "N/A"],
+        ["Client", client_name or "N/A"],
+        ["Company", company_name or "N/A"],
+        ["Generated", report_date or "N/A"],
+    ]
+
+    cover_table = Table(
+        cover_data,
+        colWidths=[1.35 * inch, 5.1 * inch],
+        hAlign="LEFT",
+    )
+
+    cover_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (0, -1), brand_light),
+                ("TEXTCOLOR", (0, 0), (0, -1), brand_navy),
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("LEADING", (0, 0), (-1, -1), 12),
+                ("GRID", (0, 0), (-1, -1), 0.35, brand_border),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ]
+        )
+    )
+
+    story.append(cover_table)
+    story.append(Spacer(1, 0.22 * inch))
+
+    story.append(
+        Paragraph(
+            "This report provides a practical business, technical, product, development, and client-success analysis for the proposed project.",
+            subtitle_style,
+        )
+    )
+
+    story.append(Spacer(1, 0.12 * inch))
 
     lines = markdown_text.splitlines()
 
@@ -563,14 +702,18 @@ def markdown_to_pdf_bytes(
         line = raw_line.strip()
 
         if not line:
-            story.append(Spacer(1, 0.08 * inch))
+            story.append(Spacer(1, 0.045 * inch))
             continue
 
         if line == "---":
-            story.append(Spacer(1, 0.18 * inch))
+            story.append(Spacer(1, 0.12 * inch))
             continue
 
         line = clean_markdown_for_pdf(line)
+
+        # Avoid duplicating top title too loudly after branded header.
+        if line.startswith("# Nord AI Agency Report"):
+            continue
 
         if line.startswith("# "):
             story.append(Paragraph(escape_pdf_text(line[2:].strip()), heading1_style))
@@ -586,14 +729,18 @@ def markdown_to_pdf_bytes(
 
         if line.startswith("- "):
             story.append(
-                Paragraph("• " + escape_pdf_text(line[2:].strip()), bullet_style)
+                Paragraph("- " + escape_pdf_text(line[2:].strip()), bullet_style)
             )
             continue
 
         if line.startswith("* "):
             story.append(
-                Paragraph("• " + escape_pdf_text(line[2:].strip()), bullet_style)
+                Paragraph("- " + escape_pdf_text(line[2:].strip()), bullet_style)
             )
+            continue
+
+        if line.startswith("_Section generated with:"):
+            story.append(Paragraph(escape_pdf_text(line), small_style))
             continue
 
         story.append(Paragraph(escape_pdf_text(line), body_style))
@@ -610,12 +757,20 @@ def markdown_to_pdf_bytes(
 # UI
 # =========================
 
-st.title("🤖 Nord AI Agency")
+header_col1, header_col2 = st.columns([1, 4])
 
-st.write(
-    "Generate a practical agency-style project report. "
-    "If one model fails or times out, the app automatically tries the next selected model."
-)
+with header_col1:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), width=170)
+    else:
+        st.markdown("## 🤖")
+
+with header_col2:
+    st.title("Nord AI Agency")
+    st.write(
+        "Generate a practical agency-style project report. "
+        "If one model fails or times out, the app automatically tries the next selected model."
+    )
 
 if not OPENROUTER_API_KEY:
     st.error("OpenRouter API key is missing.")
@@ -627,6 +782,9 @@ if not OPENROUTER_API_KEY:
 
 
 with st.sidebar:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), width=180)
+
     st.title("Settings")
 
     default_index = 0
@@ -693,7 +851,7 @@ with st.form("project_form"):
 
         company_name = st.text_input(
             "Company Name",
-            placeholder="Example: Nord AI Agency",
+            placeholder="Example: Nord Projects",
         )
 
     with lead_col2:
@@ -960,6 +1118,11 @@ Version: v1.1 — Lead Capture
     pdf_report = markdown_to_pdf_bytes(
         markdown_text=full_report,
         title=f"Nord AI Agency Report - {project_name}",
+        logo_path=LOGO_PATH,
+        client_name=client_name,
+        company_name=company_name,
+        project_name=project_name,
+        report_date=report_date,
     )
 
     st.markdown("---")
