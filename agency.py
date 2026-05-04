@@ -12,7 +12,14 @@ from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    Image,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 
 # =========================
@@ -34,10 +41,6 @@ load_dotenv()
 
 
 def get_config_value(key: str, default: str | None = None) -> str | None:
-    """
-    Streamlit Cloud: reads from app secrets.
-    Local development: reads from .env.
-    """
     try:
         if key in st.secrets:
             return st.secrets[key]
@@ -131,11 +134,6 @@ def build_messages_for_model(
     system_prompt: str,
     user_prompt: str,
 ) -> list[dict]:
-    """
-    Google/Gemma routes may reject system/developer instructions.
-    For those models, combine instructions and user request into one user message.
-    """
-
     model_lower = model_id.lower()
 
     if "gemma" in model_lower or model_lower.startswith("google/"):
@@ -347,15 +345,6 @@ def generate_section_with_fallback(
     temperature: float,
     max_tokens: int,
 ) -> tuple[str, str, list[dict]]:
-    """
-    Tries models in order until one produces the section.
-
-    Returns:
-    - section text
-    - model used
-    - attempt logs
-    """
-
     if client is None:
         raise ValueError("OPENROUTER_API_KEY is missing.")
 
@@ -372,9 +361,12 @@ Rules:
 - Start with the heading: # {section_title}
 - Be practical and beginner-friendly.
 - Use clear Markdown.
+- Use Markdown tables when useful.
 - Focus on realistic delivery within the stated budget and timeline.
 - Be honest about risks and tradeoffs.
 - Recommend an MVP-first approach.
+- Use only standard ASCII punctuation where possible.
+- Avoid special dashes, smart quotes, box symbols, unusual bullets, and emojis.
 - Use the client details when useful, but do not expose private contact information unnecessarily in analysis text.
 - Do not mention that you are an AI model.
 """
@@ -441,13 +433,6 @@ def generate_report_with_fallbacks(
     fallback_models: list[str],
     temperature: float,
 ) -> tuple[str, list[dict]]:
-    """
-    Generates the report section by section.
-
-    If one model fails on a section, the next model in fallback_models is used.
-    Completed sections are preserved.
-    """
-
     report_parts = []
     all_attempt_logs = []
 
@@ -487,46 +472,43 @@ def generate_report_with_fallbacks(
 # =========================
 
 def normalize_text_for_pdf(text: str) -> str:
-    """
-    Replaces characters that often render badly in ReportLab's default fonts.
-    """
     replacements = {
-        "–": "-",
-        "—": "-",
-        "−": "-",
-        "‒": "-",
-        "‐": "-",
-        "-": "-",
-        "-": "-",
-        "■": "-",
-        "●": "-",
-        "•": "-",
-        "“": '"',
-        "”": '"',
-        "’": "'",
-        "‘": "'",
-        "…": "...",
-        "≈": "~",
-        "≥": ">=",
-        "≤": "<=",
-        "→": "->",
-        "←": "<-",
-        "×": "x",
-        "✓": "Yes",
-        "✅": "Yes",
-        "❌": "No",
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\u202f": " ",
+        "\u00a0": " ",
+        "\ufeff": "",
+        "\u25a0": "-",
+        "\u25cf": "-",
+        "\u2022": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2026": "...",
+        "\u2248": "~",
+        "\u2265": ">=",
+        "\u2264": "<=",
+        "\u2192": "->",
+        "\u2190": "<-",
+        "\u00d7": "x",
+        "\u2713": "Yes",
+        "\u2705": "Yes",
+        "\u274c": "No",
     }
 
     for old, new in replacements.items():
         text = text.replace(old, new)
 
-    return text
+    # Final safety pass for ReportLab default fonts.
+    return "".join(ch if ord(ch) < 128 else "-" for ch in text)
 
 
 def escape_pdf_text(text: str) -> str:
-    """
-    Escapes characters that ReportLab Paragraph treats as XML/HTML.
-    """
     return (
         text.replace("&", "&amp;")
         .replace("<", "&lt;")
@@ -535,9 +517,6 @@ def escape_pdf_text(text: str) -> str:
 
 
 def clean_markdown_for_pdf(text: str) -> str:
-    """
-    Small Markdown cleanup for PDF text.
-    """
     return (
         text.replace("**", "")
         .replace("__", "")
@@ -545,10 +524,96 @@ def clean_markdown_for_pdf(text: str) -> str:
     )
 
 
+def is_markdown_table_separator(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return False
+
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    if not cells:
+        return False
+
+    for cell in cells:
+        cleaned = cell.replace(":", "").replace("-", "").strip()
+        if cleaned:
+            return False
+
+    return True
+
+
+def is_markdown_table_row(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith("|") and stripped.endswith("|") and "|" in stripped[1:-1]
+
+
+def split_markdown_table_row(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def collect_markdown_table(lines: list[str], start_index: int) -> tuple[list[list[str]], int]:
+    table_rows = []
+    index = start_index
+
+    while index < len(lines):
+        line = lines[index].strip()
+
+        if not is_markdown_table_row(line):
+            break
+
+        if is_markdown_table_separator(line):
+            index += 1
+            continue
+
+        table_rows.append(split_markdown_table_row(line))
+        index += 1
+
+    return table_rows, index
+
+
+def build_pdf_table(
+    rows: list[list[str]],
+    available_width: float,
+    header_style: ParagraphStyle,
+    cell_style: ParagraphStyle,
+) -> Table:
+    max_cols = max(len(row) for row in rows)
+
+    normalized_rows = []
+    for row_index, row in enumerate(rows):
+        padded_row = row + [""] * (max_cols - len(row))
+        style = header_style if row_index == 0 else cell_style
+        normalized_rows.append(
+            [Paragraph(escape_pdf_text(clean_markdown_for_pdf(cell)), style) for cell in padded_row]
+        )
+
+    col_width = available_width / max_cols
+    table = Table(
+        normalized_rows,
+        colWidths=[col_width] * max_cols,
+        repeatRows=1 if len(normalized_rows) > 1 else 0,
+        hAlign="LEFT",
+    )
+
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F6FB")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111A4D")),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D9E2F2")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ]
+        )
+    )
+
+    return table
+
+
 def add_pdf_footer(canvas, doc):
-    """
-    Adds page number and footer branding to each PDF page.
-    """
     canvas.saveState()
 
     page_number = canvas.getPageNumber()
@@ -583,19 +648,6 @@ def markdown_to_pdf_bytes(
     project_name: str = "",
     report_date: str = "",
 ) -> bytes:
-    """
-    Converts simple Markdown into a branded PDF file.
-
-    Supports:
-    - Logo header
-    - Cover details section
-    - # headings
-    - ## headings
-    - ### headings
-    - bullet lines
-    - normal paragraphs
-    """
-
     markdown_text = normalize_text_for_pdf(markdown_text)
 
     buffer = BytesIO()
@@ -608,6 +660,9 @@ def markdown_to_pdf_bytes(
         topMargin=0.55 * inch,
         bottomMargin=0.6 * inch,
     )
+
+    page_width, _ = A4
+    available_width = page_width - doc.leftMargin - doc.rightMargin
 
     styles = getSampleStyleSheet()
 
@@ -686,9 +741,25 @@ def markdown_to_pdf_bytes(
         textColor=muted_text,
     )
 
+    table_header_style = ParagraphStyle(
+        "NordTableHeader",
+        parent=styles["BodyText"],
+        fontSize=7.5,
+        leading=9,
+        textColor=brand_navy,
+        fontName="Helvetica-Bold",
+    )
+
+    table_cell_style = ParagraphStyle(
+        "NordTableCell",
+        parent=styles["BodyText"],
+        fontSize=7.2,
+        leading=9,
+        textColor=brand_dark,
+    )
+
     story = []
 
-    # Brand header
     logo_cell = ""
     if logo_path and logo_path.exists():
         logo_cell = Image(str(logo_path), width=1.55 * inch, height=1.05 * inch)
@@ -719,7 +790,6 @@ def markdown_to_pdf_bytes(
     story.append(header_table)
     story.append(Spacer(1, 0.18 * inch))
 
-    # Cover/project summary box
     cover_data = [
         ["Project", project_name or "N/A"],
         ["Client", client_name or "N/A"],
@@ -774,65 +844,100 @@ def markdown_to_pdf_bytes(
     }
 
     skip_until_next_hr = False
+    i = 0
 
-    for raw_line in lines:
+    while i < len(lines):
+        raw_line = lines[i]
         line = raw_line.strip()
 
         if line in skip_headings:
             skip_until_next_hr = True
+            i += 1
             continue
 
         if skip_until_next_hr:
             if line == "---":
                 skip_until_next_hr = False
+            i += 1
             continue
 
         if any(line.startswith(prefix) for prefix in skip_sections):
+            i += 1
             continue
 
         if not line:
             story.append(Spacer(1, 0.045 * inch))
+            i += 1
             continue
 
         if line == "---":
             story.append(Spacer(1, 0.12 * inch))
+            i += 1
+            continue
+
+        if (
+            is_markdown_table_row(line)
+            and i + 1 < len(lines)
+            and is_markdown_table_separator(lines[i + 1])
+        ):
+            table_rows, next_index = collect_markdown_table(lines, i)
+
+            if table_rows:
+                pdf_table = build_pdf_table(
+                    rows=table_rows,
+                    available_width=available_width,
+                    header_style=table_header_style,
+                    cell_style=table_cell_style,
+                )
+                story.append(Spacer(1, 0.06 * inch))
+                story.append(pdf_table)
+                story.append(Spacer(1, 0.08 * inch))
+
+            i = next_index
             continue
 
         line = clean_markdown_for_pdf(line)
 
-        # Avoid duplicating top title after branded header.
         if line.startswith("# Nord AI Agency Report"):
+            i += 1
             continue
 
         if line.startswith("# "):
             story.append(Paragraph(escape_pdf_text(line[2:].strip()), heading1_style))
+            i += 1
             continue
 
         if line.startswith("## "):
             story.append(Paragraph(escape_pdf_text(line[3:].strip()), heading2_style))
+            i += 1
             continue
 
         if line.startswith("### "):
             story.append(Paragraph(escape_pdf_text(line[4:].strip()), heading2_style))
+            i += 1
             continue
 
         if line.startswith("- "):
             story.append(
                 Paragraph("- " + escape_pdf_text(line[2:].strip()), bullet_style)
             )
+            i += 1
             continue
 
         if line.startswith("* "):
             story.append(
                 Paragraph("- " + escape_pdf_text(line[2:].strip()), bullet_style)
             )
+            i += 1
             continue
 
         if line.startswith("_Section generated with:"):
             story.append(Paragraph(escape_pdf_text(line), small_style))
+            i += 1
             continue
 
         story.append(Paragraph(escape_pdf_text(line), body_style))
+        i += 1
 
     doc.build(
         story,
@@ -928,7 +1033,7 @@ with st.sidebar:
     st.code(str(selected_temperature))
 
     st.markdown("---")
-    st.caption("Version: v1.1 — Lead Capture")
+    st.caption("Version: v1.1 - Lead Capture")
 
 
 # =========================
@@ -1195,8 +1300,10 @@ Version: v1.1 - Lead Capture
 {ai_report}
 """
 
+    full_report_for_pdf = normalize_text_for_pdf(full_report)
+
     pdf_report = markdown_to_pdf_bytes(
-        markdown_text=full_report,
+        markdown_text=full_report_for_pdf,
         title=f"Nord AI Agency Report - {project_name}",
         logo_path=LOGO_PATH,
         client_name=client_name,
