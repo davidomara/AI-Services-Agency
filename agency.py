@@ -1,5 +1,7 @@
 import os
+import smtplib
 from datetime import datetime
+from email.message import EmailMessage
 from io import BytesIO
 from pathlib import Path
 
@@ -41,6 +43,10 @@ load_dotenv()
 
 
 def get_config_value(key: str, default: str | None = None) -> str | None:
+    """
+    Streamlit Cloud: reads from app secrets.
+    Local development: reads from .env.
+    """
     try:
         if key in st.secrets:
             return st.secrets[key]
@@ -60,6 +66,12 @@ DEFAULT_MODEL = get_config_value(
     "OPENROUTER_MODEL",
     "nvidia/nemotron-3-super-120b-a12b:free",
 )
+
+EMAIL_HOST = get_config_value("EMAIL_HOST", "smtp.gmail.com")
+EMAIL_PORT = int(get_config_value("EMAIL_PORT", "465"))
+EMAIL_USER = get_config_value("EMAIL_USER")
+EMAIL_PASSWORD = get_config_value("EMAIL_PASSWORD")
+EMAIL_TO = get_config_value("EMAIL_TO", "nordlink256@gmail.com")
 
 
 # =========================
@@ -123,6 +135,12 @@ if "report_generated" not in st.session_state:
 
 if "last_project_name" not in st.session_state:
     st.session_state.last_project_name = "nord_ai_agency_report"
+
+if "email_sent" not in st.session_state:
+    st.session_state.email_sent = False
+
+if "email_message" not in st.session_state:
+    st.session_state.email_message = ""
 
 
 # =========================
@@ -468,6 +486,81 @@ def generate_report_with_fallbacks(
 
 
 # =========================
+# Email Helper
+# =========================
+
+def send_report_email(
+    client_name: str,
+    client_email: str,
+    company_name: str,
+    project_name: str,
+    markdown_report: str,
+    pdf_report: bytes,
+) -> tuple[bool, str]:
+    """
+    Sends the generated report to Nord with Markdown and PDF attachments.
+    """
+
+    if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_TO:
+        return (
+            False,
+            "Email settings are missing. Check EMAIL_USER, EMAIL_PASSWORD, and EMAIL_TO.",
+        )
+
+    safe_project_name = (
+        project_name.lower()
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("\\", "_")
+    )
+
+    subject = f"New Nord AI Agency Report - {project_name}"
+
+    body = f"""
+A new Nord AI Agency report has been generated.
+
+Client Name: {client_name}
+Client Email: {client_email}
+Company Name: {company_name}
+Project Name: {project_name}
+
+Attached:
+1. Markdown report
+2. PDF report
+"""
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_USER
+    msg["To"] = EMAIL_TO
+    msg.set_content(body)
+
+    msg.add_attachment(
+        markdown_report.encode("utf-8"),
+        maintype="text",
+        subtype="markdown",
+        filename=f"{safe_project_name}_nord_ai_agency_report.md",
+    )
+
+    msg.add_attachment(
+        pdf_report,
+        maintype="application",
+        subtype="pdf",
+        filename=f"{safe_project_name}_nord_ai_agency_report.pdf",
+    )
+
+    try:
+        with smtplib.SMTP_SSL(EMAIL_HOST, EMAIL_PORT) as smtp:
+            smtp.login(EMAIL_USER, EMAIL_PASSWORD)
+            smtp.send_message(msg)
+
+        return True, f"Report emailed to {EMAIL_TO}."
+
+    except Exception as e:
+        return False, str(e)
+
+
+# =========================
 # PDF Export Helpers
 # =========================
 
@@ -504,7 +597,6 @@ def normalize_text_for_pdf(text: str) -> str:
     for old, new in replacements.items():
         text = text.replace(old, new)
 
-    # Final safety pass for ReportLab default fonts.
     return "".join(ch if ord(ch) < 128 else "-" for ch in text)
 
 
@@ -583,10 +675,17 @@ def build_pdf_table(
         padded_row = row + [""] * (max_cols - len(row))
         style = header_style if row_index == 0 else cell_style
         normalized_rows.append(
-            [Paragraph(escape_pdf_text(clean_markdown_for_pdf(cell)), style) for cell in padded_row]
+            [
+                Paragraph(
+                    escape_pdf_text(clean_markdown_for_pdf(cell)),
+                    style,
+                )
+                for cell in padded_row
+            ]
         )
 
     col_width = available_width / max_cols
+
     table = Table(
         normalized_rows,
         colWidths=[col_width] * max_cols,
@@ -1033,7 +1132,7 @@ with st.sidebar:
     st.code(str(selected_temperature))
 
     st.markdown("---")
-    st.caption("Version: v1.1 - Lead Capture")
+    st.caption("Version: v1.2 - Email Reports")
 
 
 # =========================
@@ -1241,7 +1340,7 @@ if submitted:
 
 Generated: {report_date}
 
-Version: v1.1 - Lead Capture
+Version: v1.2 - Email Reports
 
 ---
 
@@ -1319,6 +1418,18 @@ Version: v1.1 - Lead Capture
     st.session_state.report_generated = True
     st.session_state.last_project_name = project_name
 
+    email_sent, email_message = send_report_email(
+        client_name=client_name,
+        client_email=client_email,
+        company_name=company_name,
+        project_name=project_name,
+        markdown_report=full_report,
+        pdf_report=pdf_report,
+    )
+
+    st.session_state.email_sent = email_sent
+    st.session_state.email_message = email_message
+
     st.success("Report generated successfully.")
 
 
@@ -1329,6 +1440,14 @@ Version: v1.1 - Lead Capture
 if st.session_state.report_generated and st.session_state.full_report:
     st.markdown("---")
     st.subheader("Generated Report")
+
+    if st.session_state.email_message:
+        if st.session_state.email_sent:
+            st.success(st.session_state.email_message)
+        else:
+            st.warning(
+                f"Report generated, but email sending failed: {st.session_state.email_message}"
+            )
 
     st.markdown(st.session_state.ai_report)
 
@@ -1383,4 +1502,6 @@ if st.session_state.report_generated and st.session_state.full_report:
             st.session_state.attempt_logs = []
             st.session_state.report_generated = False
             st.session_state.last_project_name = "nord_ai_agency_report"
+            st.session_state.email_sent = False
+            st.session_state.email_message = ""
             st.rerun()
